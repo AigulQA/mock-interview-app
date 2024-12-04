@@ -1,56 +1,68 @@
-require('dotenv').config();
-const express = require('express');
-const bodyParser = require('body-parser');
-const cors = require('cors');
-const axios = require('axios');
-const path = require('path');
+const dotenv = require("dotenv");
+dotenv.config();
+const express = require("express");
+const bodyParser = require("body-parser");
+const path = require("path");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
+// Check for API key
+if (!process.env.GEMINI_API_KEY) {
+  console.error("Error: GEMINI_API_KEY is not set in the environment variables.");
+  process.exit(1);
+}
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const app = express();
-const PORT = 3000;
 
-// Middleware
-app.use(cors());
 app.use(bodyParser.json());
+app.use(express.static(path.join(__dirname, "public")));
 
-// Serve static files from the 'public' directory
-app.use(express.static(path.join(__dirname, 'public')));
+app.post("/interview", async (req, res) => {
+  const { jobTitle, userResponse, conversationHistory: clientHistory } = req.body;
 
-// Default route
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  if (!jobTitle || !userResponse) {
+    return res.status(400).json({ error: "Job title and user response are required." });
+  }
+
+  const conversationHistory = clientHistory || [];
+  conversationHistory.push({ role: "user", parts: [{ text: userResponse }] });
+
+  const aiResponses = conversationHistory.filter((msg) => msg.role === "model").length;
+
+  let prompt;
+  if (aiResponses === 0) {
+    prompt = `
+      You are a professional interviewer for the role "${jobTitle}".
+      Start the interview by asking: "Tell me about yourself." Provide only this one question without additional commentary.
+    `;
+  } else if (aiResponses < 6) {
+    prompt = `
+      You are a professional interviewer for the role "${jobTitle}".
+      The conversation history so far is as follows:
+      ${conversationHistory.map((msg) => `${msg.role}: ${msg.parts[0].text}`).join("\n")}
+      Based on the user's responses so far, ask the next interview question. Provide only this one question without additional commentary.
+    `;
+  } else {
+    prompt = `
+      You are a professional interviewer. The user has completed their interview for the role "${jobTitle}".
+      The conversation history is as follows:
+      ${conversationHistory.map((msg) => `${msg.role}: ${msg.parts[0].text}`).join("\n")}
+      Provide concise feedback on the candidate's performance and suggest areas for improvement. Avoid any additional commentary.
+    `;
+  }
+
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const result = await model.generateContent(prompt);
+
+    const aiResponse = result.response.text();
+    conversationHistory.push({ role: "model", parts: [{ text: aiResponse }] });
+
+    res.json({ aiResponse, conversationHistory });
+  } catch (error) {
+    console.error("Error during AI generation:", error.message);
+    res.status(500).json({ error: "Failed to generate AI response." });
+  }
 });
 
-// Route to handle interview logic
-app.post('/interview', async (req, res) => {
-    const { jobTitle, userResponse, conversation } = req.body;
-
-    // Construct the prompt for the AI
-    let prompt = `You are an interviewer for the role of ${jobTitle}. `;
-    if (conversation.length === 1) {
-        prompt += 'Start with "Tell me about yourself". ';
-    } else {
-        prompt += 'Continue the interview by asking relevant questions or responding to the user based on their answers. ';
-    }
-    prompt += `The user said: "${userResponse}"`;
-
-    try {
-        // Call the AI API (Google Gemini or OpenAI GPT-4)
-        const apiResponse = await axios.post('https://api.example.com/v1/generate', {
-            prompt,
-            max_tokens: 200
-        }, {
-            headers: { Authorization: `Bearer ${process.env.API_KEY}` }
-        });
-
-        const reply = apiResponse.data.choices[0].text.trim();
-        res.json({ reply });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Failed to generate a response from AI.' });
-    }
-});
-
-// Start the server
-app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
-});
+app.listen(3000, () => console.log("Server running on http://localhost:3000"));
